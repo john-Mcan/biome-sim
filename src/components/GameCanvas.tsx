@@ -6,10 +6,15 @@ import { useSimStore } from "../store/useSimStore";
 export default function GameCanvas() {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const workerRef = useRef<Worker | null>(null);
-  const { config } = useSimStore();
+  const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  
+  // Usar una función para obtener el estado más reciente dentro de los efectos
+  const { getState } = useSimStore;
 
   useEffect(() => {
-    if (!canvasRef.current) return;
+    if (!canvasRef.current || workerRef.current) return;
+
+    console.log("Initializing GameCanvas worker...");
 
     // Crear worker
     const worker = new Worker(new URL("../workers/simulation.ts", import.meta.url), {
@@ -17,56 +22,71 @@ export default function GameCanvas() {
     });
     workerRef.current = worker;
 
-    const rect = canvasRef.current.getBoundingClientRect();
-    const offscreen = canvasRef.current.transferControlToOffscreen();
+    const sendInitMessage = () => {
+      if (!canvasRef.current || !workerRef.current) return;
+      const rect = canvasRef.current.getBoundingClientRect();
+      const offscreen = canvasRef.current.transferControlToOffscreen();
 
-    worker.postMessage(
-      {
-        type: "init",
-        canvas: offscreen,
-        width: rect.width,
-        height: rect.height,
-        config: {
-          foodRate: config.foodRate,
-          mutationRate: config.mutationRate,
-          maxFood: 500,
+      workerRef.current!.postMessage(
+        {
+          type: "init",
+          canvas: offscreen,
+          width: rect.width,
+          height: rect.height,
+          config: getState().config,
         },
-      },
-      [offscreen]
-    );
+        [offscreen]
+      );
+    };
 
-    // TODO: Recibir datos agregados y actualizar gráfico
+    sendInitMessage();
+
+    resizeObserverRef.current = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (!workerRef.current) continue;
+        const { width, height } = entry.contentRect;
+        workerRef.current.postMessage({ type: "resize", width, height });
+      }
+    });
+    resizeObserverRef.current.observe(canvasRef.current);
+
     worker.onmessage = (ev) => {
-      const msg = ev.data as { type: string };
-      if (msg.type === "stats") {
-        const { t, herbivores, carnivores } = ev.data as {
-          t: number;
-          herbivores: number;
-          carnivores: number;
-        };
-        useSimStore.getState().addPopulation({ t, herbivores, carnivores });
+      if (ev.data.type === "stats") {
+        getState().addPopulation(ev.data);
       }
     };
 
+    const handleReset = () => {
+      if (workerRef.current) {
+        workerRef.current.postMessage({ type: "reset" });
+      }
+    };
+    window.addEventListener('resetSimulation', handleReset);
+
     return () => {
+      console.log("Terminating GameCanvas worker.");
       worker.terminate();
       workerRef.current = null;
+      resizeObserverRef.current?.disconnect();
+      window.removeEventListener('resetSimulation', handleReset);
     };
-  }, []);
+  }, [getState]);
 
   // Enviar cambios de configuración
   useEffect(() => {
-    if (workerRef.current) {
-      workerRef.current.postMessage({ type: "config", config });
-    }
-  }, [config]);
+    const unsubscribe = useSimStore.subscribe((state) => {
+      if (workerRef.current) {
+        workerRef.current.postMessage({ type: "config", config: state.config });
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   return (
     <canvas
       ref={canvasRef}
-      width={800}
-      height={600}
-      style={{ width: "100%", height: "100%", background: "black" }}
+      className="absolute top-0 left-0 w-full h-full"
+      style={{ background: "black" }}
     />
   );
 } 
